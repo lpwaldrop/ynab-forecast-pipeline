@@ -1,11 +1,15 @@
+import csv
 import random
+import ynab_budget_history
 from ynab_budget_history import (
     MONTHS_TO_FETCH,
+    SNAPSHOTS_FILENAME,
     avg_category_misses,
     compare_3m_projections,
     get_monthly_target,
     milliunits_to_currency,
     project_monthly_spend,
+    save_forecast_snapshot,
     simulate_3m_spend,
 )
 
@@ -129,3 +133,30 @@ def test_synthetic_budget_pipeline_end_to_end():
 
     total_summary, _ = simulate_3m_spend(rows_by_category)
     assert (total_summary["p10"], total_summary["p50"], total_summary["p90"]) == (8339.57, 9092.8, 10370.88)
+
+
+def test_save_forecast_snapshot_creates_appends_and_upserts(tmp_path, monkeypatch):
+    monkeypatch.setattr(ynab_budget_history, "OUTPUT_FOLDER", tmp_path)
+    snapshot_file = tmp_path / SNAPSHOTS_FILENAME
+
+    first_forecast = {"run_date": "2026-10-15", "projected_monthly": 3000.0, "projected_next_3m": 9000.0}
+    first_mc = {"runs": 2000, "p10": 8000.0, "p50": 8900.0, "p90": 10200.0, "mean": 9050.0}
+    save_forecast_snapshot(first_forecast, first_mc, last_history_month="2026-09")
+
+    second_forecast = {"run_date": "2026-11-10", "projected_monthly": 3100.0, "projected_next_3m": 9300.0}
+    second_mc = {"runs": 2000, "p10": 8200.0, "p50": 9100.0, "p90": 10500.0, "mean": 9250.0}
+    save_forecast_snapshot(second_forecast, second_mc, last_history_month="2026-10")
+
+    # Re-running later in the same month should update the 2026-10 row rather than duplicating it
+    updated_second = {"run_date": "2026-11-19", "projected_monthly": 3150.0, "projected_next_3m": 9450.0}
+    save_forecast_snapshot(updated_second, second_mc, last_history_month="2026-10")
+
+    with snapshot_file.open("r", newline="", encoding="utf-8") as csv_file:
+        rows = list(csv.DictReader(csv_file))
+
+    assert [row["last_history_month"] for row in rows] == ["2026-09", "2026-10"]
+    assert rows[0]["run_date"] == "2026-10-15"
+    assert rows[0]["projected_next_3m"] == "9000.0"
+    assert rows[1]["run_date"] == "2026-11-19"
+    assert rows[1]["projected_monthly"] == "3150.0"
+    assert rows[1]["mc_p50_3m"] == "9100.0"
