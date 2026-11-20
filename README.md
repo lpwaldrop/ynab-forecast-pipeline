@@ -50,7 +50,7 @@ Monte Carlo 3m spend (2000 runs) -> P10: $8339.57 | P50: $9092.80 | P90: $10370.
 - `ynab_backtest_3m.csv` — Category-level 3-month backtest results
 - `ynab_forecast_3m.csv` — Timestamped forward 3-month spend forecast
 - `ynab_montecarlo_3m.csv` — 2,000-run bootstrap Monte Carlo simulation showing P10/P50/P90 3-month spend and upside risk per category
-- `ynab_forecast_snapshots.csv` — One row per closed history month (`last_history_month`, marking the end of the 18-month lookback) logging the next-3-month forecast and Monte Carlo P10/P50/P90 bands for later auditing
+- `ynab_forecast_snapshots.csv` — One row per closed history month (`last_history_month`, marking the end of the 18-month lookback) logging that month's `actual_monthly_spend` alongside the next-3-month forecast and Monte Carlo P10/P50/P90 bands (`monte_carlo_*`) for immediate monthly auditing
 
 ## Methodology & Key Findings
 

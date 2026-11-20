@@ -4,6 +4,7 @@ import ynab_budget_history
 from ynab_budget_history import (
     MONTHS_TO_FETCH,
     SNAPSHOTS_FILENAME,
+    audit_forecast_snapshots,
     avg_category_misses,
     compare_3m_projections,
     get_monthly_target,
@@ -140,23 +141,50 @@ def test_save_forecast_snapshot_creates_appends_and_upserts(tmp_path, monkeypatc
     snapshot_file = tmp_path / SNAPSHOTS_FILENAME
 
     first_forecast = {"run_date": "2026-10-15", "projected_monthly": 3000.0, "projected_next_3m": 9000.0}
-    first_mc = {"runs": 2000, "p10": 8000.0, "p50": 8900.0, "p90": 10200.0, "mean": 9050.0}
-    save_forecast_snapshot(first_forecast, first_mc, last_history_month="2026-09")
+    first_monte_carlo = {"runs": 2000, "p10": 8000.0, "p50": 8900.0, "p90": 10200.0, "mean": 9050.0}
+    save_forecast_snapshot(first_forecast, first_monte_carlo, "2026-09", 2950.0)
 
     second_forecast = {"run_date": "2026-11-10", "projected_monthly": 3100.0, "projected_next_3m": 9300.0}
-    second_mc = {"runs": 2000, "p10": 8200.0, "p50": 9100.0, "p90": 10500.0, "mean": 9250.0}
-    save_forecast_snapshot(second_forecast, second_mc, last_history_month="2026-10")
+    second_monte_carlo = {"runs": 2000, "p10": 8200.0, "p50": 9100.0, "p90": 10500.0, "mean": 9250.0}
+    save_forecast_snapshot(second_forecast, second_monte_carlo, "2026-10", 3050.0)
 
     # Re-running later in the same month should update the 2026-10 row rather than duplicating it
     updated_second = {"run_date": "2026-11-19", "projected_monthly": 3150.0, "projected_next_3m": 9450.0}
-    save_forecast_snapshot(updated_second, second_mc, last_history_month="2026-10")
+    save_forecast_snapshot(updated_second, second_monte_carlo, "2026-10", 3050.0)
 
     with snapshot_file.open("r", newline="", encoding="utf-8") as csv_file:
         rows = list(csv.DictReader(csv_file))
 
     assert [row["last_history_month"] for row in rows] == ["2026-09", "2026-10"]
     assert rows[0]["run_date"] == "2026-10-15"
+    assert rows[0]["actual_monthly_spend"] == "2950.0"
     assert rows[0]["projected_next_3m"] == "9000.0"
     assert rows[1]["run_date"] == "2026-11-19"
+    assert rows[1]["actual_monthly_spend"] == "3050.0"
     assert rows[1]["projected_monthly"] == "3150.0"
-    assert rows[1]["mc_p50_3m"] == "9100.0"
+    assert rows[1]["monte_carlo_p50_3m"] == "9100.0"
+
+
+def test_audit_forecast_snapshots_single_and_multi_month():
+    single_snapshot = [
+        {"last_history_month": "2026-10", "actual_monthly_spend": "1000.0", "projected_monthly": "1100.0", "monte_carlo_p50_3m": "3000.0"}
+    ]
+    assert audit_forecast_snapshots(single_snapshot) is None
+
+    ordered_snapshots = [
+        {"last_history_month": "2026-10", "actual_monthly_spend": "1000.0", "projected_monthly": "1100.0", "monte_carlo_p50_3m": "3000.0"},
+        {"last_history_month": "2026-11", "actual_monthly_spend": "800.0", "projected_monthly": "1200.0", "monte_carlo_p50_3m": "3300.0"},
+        {"last_history_month": "2026-12", "actual_monthly_spend": "1900.0", "projected_monthly": "1300.0", "monte_carlo_p50_3m": "3600.0"},
+        {"last_history_month": "2027-01", "actual_monthly_spend": 1800.0, "projected_monthly": 1350.0, "monte_carlo_p50_3m": 3900.0},
+    ]
+
+    summary = audit_forecast_snapshots(ordered_snapshots)
+
+    assert summary == {
+        "months_evaluated": 3,
+        "total_comparisons": 6,
+        "avg_model_miss": 600.0,
+        "avg_monte_carlo_miss": 666.67,
+        "avg_model_bias": 500.0,
+        "model_wins": 5,
+    }
