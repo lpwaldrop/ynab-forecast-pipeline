@@ -7,6 +7,7 @@ from ynab_budget_history import (
     audit_forecast_snapshots,
     avg_category_misses,
     compare_3m_projections,
+    get_latest_month_spend,
     get_monthly_target,
     milliunits_to_currency,
     project_monthly_spend,
@@ -188,3 +189,15 @@ def test_audit_forecast_snapshots_single_and_multi_month():
         "avg_model_bias": 500.0,
         "model_wins": 5,
     }
+
+
+def test_get_latest_month_spend():
+    rows_by_category = {
+        ("Bills", "Internet"): make_rows([-100.0, -100.0, -100.0]),
+        # Shorter history missing the latest month (2026-03) should not break latest-month totals
+        ("Frequent", "Dining Out"): make_rows([-50.0, -75.0]),
+        # Positive activity (refunds) reduces net spending in that month
+        ("Frequent", "Shopping"): make_rows([0.0, -20.0, 15.0]),
+    }
+
+    assert get_latest_month_spend(rows_by_category) == ("2026-03", 85.0)

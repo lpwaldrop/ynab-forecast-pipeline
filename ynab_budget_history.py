@@ -485,12 +485,13 @@ def monte_carlo_forecast(rows_by_category):
     )
     return total_summary
 
-def get_latest_month_spend(history_rows):
-    """Return the latest closed month (YYYY-MM) and its total spending from history_rows."""
+def get_latest_month_spend(rows_by_category):
+    """Return the latest closed month (YYYY-MM) and its total spending from rows_by_category."""
     monthly_totals = {}
-    for row in history_rows:
-        month_key = row["month"][:7]
-        monthly_totals[month_key] = monthly_totals.get(month_key, 0.0) + (row["activity"] * -1)
+    for category_rows in rows_by_category.values():
+        for row in category_rows:
+            month_key = row["month"][:7]
+            monthly_totals[month_key] = monthly_totals.get(month_key, 0.0) + (row["activity"] * -1)
     # YYYY-MM strings sort chronologically, so max() returns the latest closed month
     last_history_month = max(monthly_totals.keys())
     actual_monthly_spend = round(monthly_totals[last_history_month], 2)
@@ -598,7 +599,7 @@ if __name__ == "__main__":
     forecast_summary = forecast_next_3_months(rows_by_category)
     walk_forward_validate_3m(rows_by_category)
     monte_carlo_summary = monte_carlo_forecast(rows_by_category)
-    last_history_month, actual_monthly_spend = get_latest_month_spend(history_rows)
+    last_history_month, actual_monthly_spend = get_latest_month_spend(rows_by_category)
     ordered_snapshots = save_forecast_snapshot(
         forecast_summary, monte_carlo_summary, last_history_month, actual_monthly_spend
     )
