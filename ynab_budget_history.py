@@ -31,8 +31,8 @@ SUMMARY_FILENAME = f"ynab_category_summary_{MONTHS_TO_FETCH}m.csv"
 CHART_FILENAME = f"ynab_category_summary_{MONTHS_TO_FETCH}m.html"
 BACKTEST_FILENAME = "ynab_backtest_3m.csv"
 FORECAST_FILENAME = "ynab_forecast_3m.csv"
-WALKFORWARD_FILENAME = "ynab_walkforward_3m.csv"
 SIMULATION_FILENAME = "ynab_montecarlo_3m.csv"
+SNAPSHOTS_FILENAME = "ynab_forecast_snapshots.csv"
 
 # Helpers
 def get_cutoff_month(months_back):
@@ -103,6 +103,7 @@ def compare_3m_projections(rows_by_category, train_months=None):
         if not test_window_dates:
             test_window_dates = f"{test_month_rows[0]['month'][:7]} to {test_month_rows[-1]['month'][:7]}"
 
+        # recent_weight=0.0 averages the full test_month_rows slice without weighting
         actual_monthly_spend = project_monthly_spend(test_month_rows, recent_weight=0.0)
         long_avg_projected = project_monthly_spend(train_month_rows, recent_weight=0.0)
         recent_avg_projected = project_monthly_spend(train_month_rows, recent_weight=1.0)
@@ -151,6 +152,7 @@ def simulate_3m_spend(rows_by_category, runs=SIMULATION_RUNS, seed=SIMULATION_SE
     category_risks = []
 
     for (category_group, category_name), category_rows in rows_by_category.items():
+        # Clamp net-refund months to $0 so bootstrap draws represent non-negative spend
         monthly_spends = [abs(min(0, row["activity"])) for row in category_rows]
         if sum(monthly_spends) == 0:
             continue
@@ -435,12 +437,19 @@ def forecast_next_3_months(rows_by_category):
     forecasts.sort(key=lambda row: row["projected_next_3m"], reverse=True)
     write_csv(FORECAST_FILENAME, forecasts)
 
-    if forecasts:
-        print(f"Forecast total spend (next 3m): ${total_3m:.2f} (${total_monthly:.2f}/mo)")
+    print(f"Forecast total spend (next 3m): ${total_3m:.2f} (${total_monthly:.2f}/mo)")
+    return {
+        "run_date": run_date,
+        "projected_monthly": round(total_monthly, 2),
+        "projected_next_3m": round(total_3m, 2),
+    }
 
 def walk_forward_validate_3m(rows_by_category):
     # Test the projection formula across multiple 3-month periods (9m, 12m, and 15m training)
-    validation_results = []
+    periods_tested = 0
+    total_long = 0.0
+    total_recent = 0.0
+    total_model = 0.0
 
     for train_months in range(9, (MONTHS_TO_FETCH - 2), 3):
         results, test_window_dates = compare_3m_projections(rows_by_category, train_months=train_months)
@@ -448,52 +457,150 @@ def walk_forward_validate_3m(rows_by_category):
             continue
 
         avg_miss_long, avg_miss_recent, avg_miss_model, median_miss_model = avg_category_misses(results)
-        candidates = {"Long": avg_miss_long, f"{RECENT_MONTHS}m": avg_miss_recent, "Model": avg_miss_model}
-        best_method = min(candidates, key=candidates.get)
-
-        validation_results.append(
-            {
-                "test_window_dates": test_window_dates,
-                "train_months": train_months,
-                "avg_miss_long": avg_miss_long,
-                f"avg_miss_{RECENT_MONTHS}m": avg_miss_recent,
-                "avg_miss_model": avg_miss_model,
-                "median_miss_model": median_miss_model,
-                "best_method": best_method,
-            }
-        )
+        periods_tested += 1
+        total_long += avg_miss_long
+        total_recent += avg_miss_recent
+        total_model += avg_miss_model
         print(
             f"Walk-forward {test_window_dates} ({train_months:>2}m train) -> "
             f"Long: ${avg_miss_long:.2f} | {RECENT_MONTHS}m: ${avg_miss_recent:.2f} | Model: ${avg_miss_model:.2f} (Median: ${median_miss_model:.2f})"
         )
 
-    if validation_results:
-        overall_long = sum(row["avg_miss_long"] for row in validation_results) / len(validation_results)
-        overall_recent = sum(row[f"avg_miss_{RECENT_MONTHS}m"] for row in validation_results) / len(validation_results)
-        overall_model = sum(row["avg_miss_model"] for row in validation_results) / len(validation_results)
+    if periods_tested:
+        overall_long = total_long / periods_tested
+        overall_recent = total_recent / periods_tested
+        overall_model = total_model / periods_tested
         print(
             f"Walk-forward overall avg           -> "
             f"Long: ${overall_long:.2f} | {RECENT_MONTHS}m: ${overall_recent:.2f} | Model: ${overall_model:.2f}"
         )
-        write_csv(WALKFORWARD_FILENAME, validation_results)
 
 def monte_carlo_forecast(rows_by_category):
     total_summary, category_risks = simulate_3m_spend(rows_by_category)
-    if not category_risks:
-        return
 
     write_csv(SIMULATION_FILENAME, category_risks)
     print(
         f"Monte Carlo 3m spend ({total_summary['runs']} runs) -> "
         f"P10: ${total_summary['p10']:.2f} | P50: ${total_summary['p50']:.2f} | P90: ${total_summary['p90']:.2f}"
     )
+    return total_summary
+
+def get_latest_month_spend(rows_by_category):
+    """Return the latest closed month (YYYY-MM) and its total spending from rows_by_category."""
+    monthly_totals = {}
+    for category_rows in rows_by_category.values():
+        for row in category_rows:
+            month_key = row["month"][:7]
+            monthly_totals[month_key] = monthly_totals.get(month_key, 0.0) + (row["activity"] * -1)
+    # YYYY-MM strings sort chronologically, so max() returns the latest closed month
+    last_history_month = max(monthly_totals.keys())
+    actual_monthly_spend = round(monthly_totals[last_history_month], 2)
+    return last_history_month, actual_monthly_spend
+
+def save_forecast_snapshot(forecast_summary, monte_carlo_summary, last_history_month, actual_monthly_spend):
+    """Upsert one summary snapshot row per completed history month for future forecast audits."""
+    path = OUTPUT_FOLDER.joinpath(SNAPSHOTS_FILENAME)
+
+    snapshot = {
+        "last_history_month": last_history_month,
+        "run_date": forecast_summary["run_date"],
+        "actual_monthly_spend": actual_monthly_spend,
+        "projected_monthly": forecast_summary["projected_monthly"],
+        "projected_next_3m": forecast_summary["projected_next_3m"],
+        "monte_carlo_runs": monte_carlo_summary["runs"],
+        "monte_carlo_p10_3m": monte_carlo_summary["p10"],
+        "monte_carlo_p50_3m": monte_carlo_summary["p50"],
+        "monte_carlo_p90_3m": monte_carlo_summary["p90"],
+        "monte_carlo_mean_3m": monte_carlo_summary["mean"],
+    }
+
+    snapshots_by_month = {}
+    if path.exists():
+        with path.open("r", newline="", encoding="utf-8") as csv_file:
+            for existing_row in csv.DictReader(csv_file):
+                if existing_row.get("last_history_month"):
+                    snapshots_by_month[existing_row["last_history_month"]] = existing_row
+
+    snapshots_by_month[last_history_month] = snapshot
+    ordered_snapshots = [snapshots_by_month[month] for month in sorted(snapshots_by_month)]
+    write_csv(SNAPSHOTS_FILENAME, ordered_snapshots)
+    print(f"Saved forecast snapshot ({last_history_month}) -> {SNAPSHOTS_FILENAME} ({len(ordered_snapshots)} total)")
+    return ordered_snapshots
+
+def audit_forecast_snapshots(ordered_snapshots):
+    """Score each closed month against up to 3 prior snapshots and print latest + overall results."""
+    months_evaluated = len(ordered_snapshots) - 1
+    if months_evaluated < 1:
+        print("Snapshot audit -> waiting for next closed month to compare (1 snapshot saved)")
+        return None
+
+    # Running totals accumulated across every evaluated month in ordered_snapshots
+    cumulative_comparisons = 0
+    model_wins = 0
+    total_model_miss = 0.0
+    total_monte_carlo_miss = 0.0
+    total_model_bias = 0.0
+    latest_month_comparisons = []
+
+    for month_index in range(1, len(ordered_snapshots)):
+        current_snapshot = ordered_snapshots[month_index]
+        actual_monthly_spend = float(current_snapshot["actual_monthly_spend"])
+
+        # Each snapshot forecasts the next 3 months, so only up to 3 prior rows cover this month
+        for prior_snapshot in ordered_snapshots[:month_index][-3:]:
+            model_miss = round(actual_monthly_spend - float(prior_snapshot["projected_monthly"]), 2)
+            # Divide 3-month Monte Carlo median by 3 to compare on a monthly scale
+            monte_carlo_miss = round(actual_monthly_spend - (float(prior_snapshot["monte_carlo_p50_3m"]) / 3.0), 2)
+
+            cumulative_comparisons += 1
+            total_model_miss += abs(model_miss)
+            total_monte_carlo_miss += abs(monte_carlo_miss)
+            total_model_bias += model_miss
+            if abs(model_miss) < abs(monte_carlo_miss):
+                model_wins += 1
+
+            if month_index == months_evaluated:
+                latest_month_comparisons.append(
+                    f"{prior_snapshot['last_history_month']} (${model_miss:+.2f} vs Monte Carlo ${monte_carlo_miss:+.2f})"
+                )
+
+    latest_snapshot = ordered_snapshots[-1]
+    print(
+        f"Snapshot audit ({latest_snapshot['last_history_month']} actual ${float(latest_snapshot['actual_monthly_spend']):.2f}) -> "
+        f"vs prior: {', '.join(latest_month_comparisons)}"
+    )
+
+    avg_model_miss = round(total_model_miss / cumulative_comparisons, 2)
+    avg_monte_carlo_miss = round(total_monte_carlo_miss / cumulative_comparisons, 2)
+    avg_model_bias = round(total_model_bias / cumulative_comparisons, 2)
+    print(
+        f"Snapshot audit overall ({cumulative_comparisons} total comparisons across {months_evaluated} months) -> "
+        f"Avg miss Model: ${avg_model_miss:.2f}/mo | Monte Carlo P50: ${avg_monte_carlo_miss:.2f}/mo | "
+        f"Bias: ${avg_model_bias:+.2f}/mo | Model wins: {model_wins}/{cumulative_comparisons}"
+    )
+    return {
+        "months_evaluated": months_evaluated,
+        "total_comparisons": cumulative_comparisons,
+        "avg_model_miss": avg_model_miss,
+        "avg_monte_carlo_miss": avg_monte_carlo_miss,
+        "avg_model_bias": avg_model_bias,
+        "model_wins": model_wins,
+    }
 
 if __name__ == "__main__":
     history_rows = export_budget_history()
+    if not history_rows:
+        print("No completed budget history rows found.")
+        raise SystemExit
     rows_by_category = group_by_category(history_rows)
     category_summaries = summarize_categories(rows_by_category)
     plot_category_summary(category_summaries)
     backtest_last_3_months(rows_by_category)
-    forecast_next_3_months(rows_by_category)
+    forecast_summary = forecast_next_3_months(rows_by_category)
     walk_forward_validate_3m(rows_by_category)
-    monte_carlo_forecast(rows_by_category)
+    monte_carlo_summary = monte_carlo_forecast(rows_by_category)
+    last_history_month, actual_monthly_spend = get_latest_month_spend(rows_by_category)
+    ordered_snapshots = save_forecast_snapshot(
+        forecast_summary, monte_carlo_summary, last_history_month, actual_monthly_spend
+    )
+    audit_forecast_snapshots(ordered_snapshots)
