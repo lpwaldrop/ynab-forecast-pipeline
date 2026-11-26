@@ -414,7 +414,7 @@ def backtest_last_3_months(rows_by_category):
     if results:
         avg_miss_long, avg_miss_recent, avg_miss_model, median_miss_model = avg_category_misses(results)
         print(
-            f"Backtest avg miss/category -> Long Avg: ${avg_miss_long:.2f} | "
+            f"\nBacktest avg miss/category -> Long Avg: ${avg_miss_long:.2f} | "
             f"{RECENT_MONTHS}m Avg: ${avg_miss_recent:.2f} | Model: ${avg_miss_model:.2f} (Median: ${median_miss_model:.2f})"
         )
 
@@ -445,7 +445,7 @@ def forecast_next_3_months(rows_by_category):
     forecasts.sort(key=lambda row: row["projected_next_3m"], reverse=True)
     write_csv(FORECAST_FILENAME, forecasts)
 
-    print(f"Forecast total spend (next 3m): ${total_3m:.2f} (${total_monthly:.2f}/mo)")
+    print(f"\nForecast total spend (next 3m) -> ${total_3m:,.2f} (${total_monthly:,.2f}/mo)")
     return {
         "run_date": run_date,
         "projected_monthly": round(total_monthly, 2),
@@ -470,7 +470,7 @@ def walk_forward_validate_3m(rows_by_category):
         total_recent += avg_miss_recent
         total_model += avg_miss_model
         print(
-            f"Walk-forward {test_window_dates} ({train_months:>2}m train) -> "
+            f"\nWalk-forward {test_window_dates} ({train_months:>2}m train) -> "
             f"Long: ${avg_miss_long:.2f} | {RECENT_MONTHS}m: ${avg_miss_recent:.2f} | Model: ${avg_miss_model:.2f} (Median: ${median_miss_model:.2f})"
         )
 
@@ -479,7 +479,7 @@ def walk_forward_validate_3m(rows_by_category):
         overall_recent = total_recent / periods_tested
         overall_model = total_model / periods_tested
         print(
-            f"Walk-forward overall avg           -> "
+            f"{'\nWalk-forward overall avg':<44} -> "
             f"Long: ${overall_long:.2f} | {RECENT_MONTHS}m: ${overall_recent:.2f} | Model: ${overall_model:.2f}"
         )
 
@@ -488,8 +488,8 @@ def monte_carlo_forecast(rows_by_category):
 
     write_csv(SIMULATION_FILENAME, category_risks)
     print(
-        f"Monte Carlo 3m spend ({total_summary['runs']} runs) -> "
-        f"P10: ${total_summary['p10']:.2f} | P50: ${total_summary['p50']:.2f} | P90: ${total_summary['p90']:.2f}"
+        f"\nMonte Carlo 3m spend ({total_summary['runs']} runs) -> "
+        f"P10: ${total_summary['p10']:,.2f} | P50: ${total_summary['p50']:,.2f} | P90: ${total_summary['p90']:,.2f}"
     )
     return total_summary
 
@@ -532,14 +532,14 @@ def save_forecast_snapshot(forecast_summary, monte_carlo_summary, last_history_m
     snapshots_by_month[last_history_month] = snapshot
     ordered_snapshots = [snapshots_by_month[month] for month in sorted(snapshots_by_month)]
     write_csv(SNAPSHOTS_FILENAME, ordered_snapshots)
-    print(f"Saved forecast snapshot ({last_history_month}) -> {SNAPSHOTS_FILENAME} ({len(ordered_snapshots)} total)")
+    print(f"\nSaved forecast snapshot ({last_history_month}) -> {SNAPSHOTS_FILENAME} ({len(ordered_snapshots)} total)")
     return ordered_snapshots
 
 def audit_forecast_snapshots(ordered_snapshots):
     """Score each closed month against up to 3 prior snapshots and print latest + overall results."""
     months_evaluated = len(ordered_snapshots) - 1
     if months_evaluated < 1:
-        print("Snapshot audit -> waiting for next closed month to compare (1 snapshot saved)")
+        print("\nSnapshot audit -> waiting for next closed month to compare (1 snapshot saved)")
         return None
 
     # Running totals accumulated across every evaluated month in ordered_snapshots
@@ -690,12 +690,16 @@ def tune_forecast_settings(rows_by_category, audit_summary):
         trigger_status = "pending next closed snapshot"
 
     print(
-        f"Forecast tuning ({trigger_status}) -> "
-        f"Current (split={baseline['split_by_goal_cadence']}, weight={baseline['recent_weight']}): "
-        f"Total miss ${baseline['avg_total_miss']:.2f}/mo (Bias ${baseline['avg_total_bias']:+.2f}/mo, "
-        f"Cat avg ${baseline['avg_category_miss']:.2f}) | "
-        f"Lowest miss (split={lowest_miss_settings['split_by_goal_cadence']}, weight={lowest_miss_settings['recent_weight']}): "
-        f"Total miss ${lowest_miss_settings['avg_total_miss']:.2f}/mo (Improvement ${total_miss_improvement:+.2f}/mo)"
+        f"\nForecast tuning ({trigger_status}):\n"
+        f"  Current     (split={str(baseline['split_by_goal_cadence']):<5}, weight={baseline['recent_weight']}) -> "
+        f"Total miss: ${baseline['avg_total_miss']:,.2f}/mo | "
+        f"Actual - forecast: ${baseline['avg_total_bias']:+,.2f}/mo | "
+        f"Avg miss/category: ${baseline['avg_category_miss']:,.2f}\n"
+        f"  Lowest miss (split={str(lowest_miss_settings['split_by_goal_cadence']):<5}, weight={lowest_miss_settings['recent_weight']}) -> "
+        f"Total miss: ${lowest_miss_settings['avg_total_miss']:,.2f}/mo | "
+        f"Actual - forecast: ${lowest_miss_settings['avg_total_bias']:+,.2f}/mo | "
+        f"Avg miss/category: ${lowest_miss_settings['avg_category_miss']:,.2f} | "
+        f"Improvement: ${total_miss_improvement:+,.2f}/mo"
     )
 
     return {
