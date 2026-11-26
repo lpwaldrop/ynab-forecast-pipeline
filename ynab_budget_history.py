@@ -12,6 +12,8 @@ MONTHS_TO_FETCH = 18
 RECENT_MONTHS = 6
 RECENT_WEIGHT = 0.0
 SPLIT_BY_GOAL_CADENCE = True
+TUNING_RECENT_WEIGHTS = (0.0, 0.25, 0.5, 0.75, 1.0)
+TUNING_CADENCE_OPTIONS = (False, True)
 SPIKE_THRESHOLD = 1.25
 TARGET_BAND_PCT = 10
 SIMULATION_RUNS = 2000
@@ -35,7 +37,7 @@ SIMULATION_FILENAME = "ynab_montecarlo_3m.csv"
 SNAPSHOTS_FILENAME = "ynab_forecast_snapshots.csv"
 
 # Helpers
-def get_cutoff_month(months_back):
+def get_cutoff_month(months_back=MONTHS_TO_FETCH):
     today = datetime.date.today()
 
     # Subtract months using a 0-based month index so year boundaries wrap cleanly
@@ -68,13 +70,15 @@ def get_monthly_target(goal_target, goal_cadence):
             return round(goal_target / 12.0, 2)
     return None
 
-def project_monthly_spend(category_rows, recent_weight=None):
+def project_monthly_spend(category_rows, recent_weight=None, split_by_goal_cadence=None):
     # Use recent average for monthly goals when cadence splitting is enabled
-    if recent_weight is None:
-        if SPLIT_BY_GOAL_CADENCE and category_rows[-1]["goal_cadence"] == MONTHLY_GOAL_CADENCE:
+    if recent_weight is None or split_by_goal_cadence is not None:
+        use_split = SPLIT_BY_GOAL_CADENCE if split_by_goal_cadence is None else split_by_goal_cadence
+        base_weight = RECENT_WEIGHT if recent_weight is None else recent_weight
+        if use_split and category_rows[-1]["goal_cadence"] == MONTHLY_GOAL_CADENCE:
             recent_weight = 1.0
         else:
-            recent_weight = RECENT_WEIGHT
+            recent_weight = base_weight
 
     # Blend the full-window average with the most recent N months
     # Flip activity sign so spending is positive and refunds reduce total spent
@@ -83,7 +87,7 @@ def project_monthly_spend(category_rows, recent_weight=None):
     recent_avg = sum((row["activity"] * -1) for row in recent_month_rows) / len(recent_month_rows)
     return round((1 - recent_weight) * long_avg + recent_weight * recent_avg, 2)
 
-def compare_3m_projections(rows_by_category, train_months=None):
+def compare_3m_projections(rows_by_category, train_months=None, recent_weight=None, split_by_goal_cadence=None):
     # Score 3-month predictions for each category on one (sample -> actual) window
     results = []
     test_window_dates = ""
@@ -107,7 +111,11 @@ def compare_3m_projections(rows_by_category, train_months=None):
         actual_monthly_spend = project_monthly_spend(test_month_rows, recent_weight=0.0)
         long_avg_projected = project_monthly_spend(train_month_rows, recent_weight=0.0)
         recent_avg_projected = project_monthly_spend(train_month_rows, recent_weight=1.0)
-        model_projected = project_monthly_spend(train_month_rows)
+        model_projected = project_monthly_spend(
+            train_month_rows,
+            recent_weight=recent_weight,
+            split_by_goal_cadence=split_by_goal_cadence,
+        )
 
         if actual_monthly_spend == 0 and long_avg_projected == 0 and recent_avg_projected == 0:
             continue
@@ -197,7 +205,7 @@ def export_budget_history():
         raise ValueError("No YNAB token found in Credential Manager (service='ynab', username='api_token').")
     plan_id = "last-used"
 
-    cutoff_month = get_cutoff_month(MONTHS_TO_FETCH)
+    cutoff_month = get_cutoff_month()
     current_month = datetime.date.today().replace(day=1)
     configuration = ynab.Configuration(access_token=token)
 
@@ -406,7 +414,7 @@ def backtest_last_3_months(rows_by_category):
     if results:
         avg_miss_long, avg_miss_recent, avg_miss_model, median_miss_model = avg_category_misses(results)
         print(
-            f"Backtest avg miss/category -> Long Avg: ${avg_miss_long:.2f} | "
+            f"\nBacktest avg miss/category -> Long Avg: ${avg_miss_long:.2f} | "
             f"{RECENT_MONTHS}m Avg: ${avg_miss_recent:.2f} | Model: ${avg_miss_model:.2f} (Median: ${median_miss_model:.2f})"
         )
 
@@ -437,7 +445,7 @@ def forecast_next_3_months(rows_by_category):
     forecasts.sort(key=lambda row: row["projected_next_3m"], reverse=True)
     write_csv(FORECAST_FILENAME, forecasts)
 
-    print(f"Forecast total spend (next 3m): ${total_3m:.2f} (${total_monthly:.2f}/mo)")
+    print(f"\nForecast total spend (next 3m) -> ${total_3m:,.2f} (${total_monthly:,.2f}/mo)")
     return {
         "run_date": run_date,
         "projected_monthly": round(total_monthly, 2),
@@ -462,7 +470,7 @@ def walk_forward_validate_3m(rows_by_category):
         total_recent += avg_miss_recent
         total_model += avg_miss_model
         print(
-            f"Walk-forward {test_window_dates} ({train_months:>2}m train) -> "
+            f"\nWalk-forward {test_window_dates} ({train_months:>2}m train) -> "
             f"Long: ${avg_miss_long:.2f} | {RECENT_MONTHS}m: ${avg_miss_recent:.2f} | Model: ${avg_miss_model:.2f} (Median: ${median_miss_model:.2f})"
         )
 
@@ -471,7 +479,7 @@ def walk_forward_validate_3m(rows_by_category):
         overall_recent = total_recent / periods_tested
         overall_model = total_model / periods_tested
         print(
-            f"Walk-forward overall avg           -> "
+            f"{'\nWalk-forward overall avg':<44} -> "
             f"Long: ${overall_long:.2f} | {RECENT_MONTHS}m: ${overall_recent:.2f} | Model: ${overall_model:.2f}"
         )
 
@@ -480,8 +488,8 @@ def monte_carlo_forecast(rows_by_category):
 
     write_csv(SIMULATION_FILENAME, category_risks)
     print(
-        f"Monte Carlo 3m spend ({total_summary['runs']} runs) -> "
-        f"P10: ${total_summary['p10']:.2f} | P50: ${total_summary['p50']:.2f} | P90: ${total_summary['p90']:.2f}"
+        f"\nMonte Carlo 3m spend ({total_summary['runs']} runs) -> "
+        f"P10: ${total_summary['p10']:,.2f} | P50: ${total_summary['p50']:,.2f} | P90: ${total_summary['p90']:,.2f}"
     )
     return total_summary
 
@@ -524,14 +532,14 @@ def save_forecast_snapshot(forecast_summary, monte_carlo_summary, last_history_m
     snapshots_by_month[last_history_month] = snapshot
     ordered_snapshots = [snapshots_by_month[month] for month in sorted(snapshots_by_month)]
     write_csv(SNAPSHOTS_FILENAME, ordered_snapshots)
-    print(f"Saved forecast snapshot ({last_history_month}) -> {SNAPSHOTS_FILENAME} ({len(ordered_snapshots)} total)")
+    print(f"\nSaved forecast snapshot ({last_history_month}) -> {SNAPSHOTS_FILENAME} ({len(ordered_snapshots)} total)")
     return ordered_snapshots
 
 def audit_forecast_snapshots(ordered_snapshots):
     """Score each closed month against up to 3 prior snapshots and print latest + overall results."""
     months_evaluated = len(ordered_snapshots) - 1
     if months_evaluated < 1:
-        print("Snapshot audit -> waiting for next closed month to compare (1 snapshot saved)")
+        print("\nSnapshot audit -> waiting for next closed month to compare (1 snapshot saved)")
         return None
 
     # Running totals accumulated across every evaluated month in ordered_snapshots
@@ -587,6 +595,122 @@ def audit_forecast_snapshots(ordered_snapshots):
         "model_wins": model_wins,
     }
 
+def score_tuning_combination(rows_by_category, train_windows, split_by_goal_cadence, recent_weight):
+    """Score one (split_by_goal_cadence, recent_weight) setting across rolling 3-month windows."""
+    periods_tested = 0
+    total_miss_sum = 0.0
+    total_bias_sum = 0.0
+    avg_category_miss_sum = 0.0
+    median_category_miss_sum = 0.0
+
+    for train_months in train_windows:
+        results, _ = compare_3m_projections(
+            rows_by_category,
+            train_months=train_months,
+            recent_weight=recent_weight,
+            split_by_goal_cadence=split_by_goal_cadence,
+        )
+        if not results:
+            continue
+
+        actual_total = sum(row["actual_3m_monthly"] for row in results)
+        projected_total = sum(row["proj_model_monthly"] for row in results)
+        _, _, avg_cat_miss, median_cat_miss = avg_category_misses(results)
+
+        periods_tested += 1
+        total_miss_sum += abs(actual_total - projected_total)
+        total_bias_sum += actual_total - projected_total
+        avg_category_miss_sum += avg_cat_miss
+        median_category_miss_sum += median_cat_miss
+
+    if periods_tested == 0:
+        return None
+
+    return {
+        "split_by_goal_cadence": split_by_goal_cadence,
+        "recent_weight": recent_weight,
+        "periods_tested": periods_tested,
+        "avg_total_miss": round(total_miss_sum / periods_tested, 2),
+        "avg_total_bias": round(total_bias_sum / periods_tested, 2),
+        "avg_category_miss": round(avg_category_miss_sum / periods_tested, 2),
+        "median_category_miss": round(median_category_miss_sum / periods_tested, 2),
+    }
+
+def tune_forecast_settings(rows_by_category, audit_summary):
+    """Compare parameter candidates across rolling 3m windows against current config and snapshot audit."""
+    max_months = max(len(rows) for rows in rows_by_category.values())
+    if max_months < 12:
+        print("Forecast tuning -> need at least 12 months of history to evaluate parameter candidates")
+        return None
+
+    last_valid_train_months = max_months - 3
+    train_windows = list(range(9, last_valid_train_months + 1, 3))
+
+    current_settings = (bool(SPLIT_BY_GOAL_CADENCE), float(RECENT_WEIGHT))
+    setting_combinations = []
+    for split_by_cadence in TUNING_CADENCE_OPTIONS:
+        for recent_weight in TUNING_RECENT_WEIGHTS:
+            combination = (bool(split_by_cadence), float(recent_weight))
+            if combination not in setting_combinations:
+                setting_combinations.append(combination)
+    if current_settings not in setting_combinations:
+        setting_combinations.append(current_settings)
+
+    scored_combinations = []
+    baseline = None
+    for split_by_cadence, recent_weight in setting_combinations:
+        scored = score_tuning_combination(rows_by_category, train_windows, split_by_cadence, recent_weight)
+        if scored is not None:
+            scored_combinations.append(scored)
+            if (split_by_cadence, recent_weight) == current_settings:
+                baseline = scored
+
+    if not scored_combinations:
+        print("Forecast tuning -> no valid category windows to evaluate")
+        return None
+
+    # Rank primarily by total monthly spend error to match snapshot-level accuracy, breaking ties by category error
+    scored_combinations.sort(key=lambda row: (row["avg_total_miss"], row["avg_category_miss"], row["median_category_miss"]))
+    lowest_miss_settings = scored_combinations[0]
+
+    total_miss_improvement = round(baseline["avg_total_miss"] - lowest_miss_settings["avg_total_miss"], 2)
+    category_miss_improvement = round(baseline["avg_category_miss"] - lowest_miss_settings["avg_category_miss"], 2)
+
+    tuning_triggered = None
+    if audit_summary is not None:
+        tuning_triggered = audit_summary["avg_model_miss"] > audit_summary["avg_monte_carlo_miss"]
+        trigger_status = (
+            f"triggered (snapshot Model ${audit_summary['avg_model_miss']:.2f}/mo > "
+            f"Monte Carlo ${audit_summary['avg_monte_carlo_miss']:.2f}/mo)"
+            if tuning_triggered
+            else f"not triggered (snapshot Model ${audit_summary['avg_model_miss']:.2f}/mo <= "
+            f"Monte Carlo ${audit_summary['avg_monte_carlo_miss']:.2f}/mo)"
+        )
+    else:
+        trigger_status = "pending next closed snapshot"
+
+    print(
+        f"\nForecast tuning ({trigger_status}):\n"
+        f"  Current     (split={str(baseline['split_by_goal_cadence']):<5}, weight={baseline['recent_weight']}) -> "
+        f"Total miss: ${baseline['avg_total_miss']:,.2f}/mo | "
+        f"Actual - forecast: ${baseline['avg_total_bias']:+,.2f}/mo | "
+        f"Avg miss/category: ${baseline['avg_category_miss']:,.2f}\n"
+        f"  Lowest miss (split={str(lowest_miss_settings['split_by_goal_cadence']):<5}, weight={lowest_miss_settings['recent_weight']}) -> "
+        f"Total miss: ${lowest_miss_settings['avg_total_miss']:,.2f}/mo | "
+        f"Actual - forecast: ${lowest_miss_settings['avg_total_bias']:+,.2f}/mo | "
+        f"Avg miss/category: ${lowest_miss_settings['avg_category_miss']:,.2f} | "
+        f"Improvement: ${total_miss_improvement:+,.2f}/mo"
+    )
+
+    return {
+        "baseline": baseline,
+        "best": lowest_miss_settings,
+        "total_miss_improvement": total_miss_improvement,
+        "category_miss_improvement": category_miss_improvement,
+        "tuning_triggered": tuning_triggered,
+        "candidates": scored_combinations,
+    }
+
 if __name__ == "__main__":
     history_rows = export_budget_history()
     if not history_rows:
@@ -603,4 +727,5 @@ if __name__ == "__main__":
     ordered_snapshots = save_forecast_snapshot(
         forecast_summary, monte_carlo_summary, last_history_month, actual_monthly_spend
     )
-    audit_forecast_snapshots(ordered_snapshots)
+    audit_summary = audit_forecast_snapshots(ordered_snapshots)
+    tune_forecast_settings(rows_by_category, audit_summary)
