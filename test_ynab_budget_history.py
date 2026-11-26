@@ -13,6 +13,7 @@ from ynab_budget_history import (
     project_monthly_spend,
     save_forecast_snapshot,
     simulate_3m_spend,
+    tune_forecast_settings,
 )
 
 
@@ -52,6 +53,10 @@ def test_project_monthly_spend_weights_and_hybrid():
     # Hybrid mode uses 6m average for monthly goals (cadence 1) and full average for annual (cadence 13)
     assert project_monthly_spend(annual_rows) == 150.0
     assert project_monthly_spend(monthly_rows) == 200.0
+    # Explicit split_by_goal_cadence overrides allow tuning combinations without mutating globals
+    assert project_monthly_spend(annual_rows, recent_weight=0.5, split_by_goal_cadence=True) == 175.0
+    assert project_monthly_spend(monthly_rows, recent_weight=0.5, split_by_goal_cadence=True) == 200.0
+    assert project_monthly_spend(monthly_rows, recent_weight=0.5, split_by_goal_cadence=False) == 175.0
 
 def test_compare_3m_projections_and_avg_misses():
     # 6 sample months at $100/mo, 3 actual months at $200/mo
@@ -201,3 +206,71 @@ def test_get_latest_month_spend():
     }
 
     assert get_latest_month_spend(rows_by_category) == ("2026-03", 85.0)
+
+
+def test_tune_forecast_settings_insufficient_history():
+    short_rows = {("Bills", "Internet"): make_rows([-100.0] * 11)}
+    assert tune_forecast_settings(short_rows, None) is None
+
+
+def test_tune_forecast_settings_ranks_candidates_and_checks_snapshot_trigger(monkeypatch):
+    # Monthly goal stepped up from $100 to $200 after month 6; annual goal has irregular $300 spikes.
+    # Across rolling windows, split_by_goal_cadence=True with recent_weight=0.0 matches both patterns best.
+    months = []
+    year, month = 2025, 5
+    for _ in range(MONTHS_TO_FETCH):
+        months.append(f"{year:04d}-{month:02d}-01")
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+
+    monthly_activities = [-100.0] * 6 + [-200.0] * 12
+    annual_activities = [-300.0 if i in (0, 3, 10, 13, 16) else 0.0 for i in range(MONTHS_TO_FETCH)]
+
+    rows_by_category = {
+        ("Frequent", "Groceries"): [
+            {"month": months[i], "activity": monthly_activities[i], "goal_cadence": 1}
+            for i in range(MONTHS_TO_FETCH)
+        ],
+        ("Non-Monthly", "Insurance"): [
+            {"month": months[i], "activity": annual_activities[i], "goal_cadence": 13}
+            for i in range(MONTHS_TO_FETCH)
+        ],
+    }
+
+    # Set a suboptimal baseline (split=False, weight=0.5) so tuning finds a clear improvement
+    monkeypatch.setattr(ynab_budget_history, "SPLIT_BY_GOAL_CADENCE", False)
+    monkeypatch.setattr(ynab_budget_history, "RECENT_WEIGHT", 0.5)
+
+    triggered_audit = {
+        "months_evaluated": 1,
+        "total_comparisons": 1,
+        "avg_model_miss": 450.0,
+        "avg_monte_carlo_miss": 300.0,
+        "avg_model_bias": 450.0,
+        "model_wins": 0,
+    }
+    tuning_result = tune_forecast_settings(rows_by_category, triggered_audit)
+
+    assert tuning_result is not None
+    assert tuning_result["tuning_triggered"] is True
+    assert tuning_result["baseline"]["split_by_goal_cadence"] is False
+    assert tuning_result["baseline"]["recent_weight"] == 0.5
+    assert tuning_result["best"]["split_by_goal_cadence"] is True
+    assert tuning_result["best"]["recent_weight"] == 0.0
+    assert tuning_result["best"]["periods_tested"] == 3
+    assert tuning_result["total_miss_improvement"] > 0
+    assert tuning_result["candidates"][0] == tuning_result["best"]
+
+    # When Model beats/matches Monte Carlo in live snapshots, tuning is not triggered
+    healthy_audit = {
+        "months_evaluated": 1,
+        "total_comparisons": 1,
+        "avg_model_miss": 200.0,
+        "avg_monte_carlo_miss": 300.0,
+        "avg_model_bias": -50.0,
+        "model_wins": 1,
+    }
+    healthy_result = tune_forecast_settings(rows_by_category, healthy_audit)
+    assert healthy_result["tuning_triggered"] is False
+    assert tune_forecast_settings(rows_by_category, None)["tuning_triggered"] is None
